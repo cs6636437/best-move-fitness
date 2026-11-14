@@ -132,6 +132,7 @@ export default function FitnessApp() {
   const [calorieProfile, setCalorieProfile] = useState({ age: "", sex: "", activity: "1.2" });
   const [calorieProfileLoaded, setCalorieProfileLoaded] = useState(false);
   const [workoutStartedAt, setWorkoutStartedAt] = useState<number | null>(null);
+  const [workoutSessionId, setWorkoutSessionId] = useState<string | null>(null);
   const [workoutElapsedSeconds, setWorkoutElapsedSeconds] = useState(0);
   const [workoutScreenVisible, setWorkoutScreenVisible] = useState(false);
   const [showCancelWorkoutConfirm, setShowCancelWorkoutConfirm] = useState(false);
@@ -283,16 +284,23 @@ export default function FitnessApp() {
   async function loadFromSupabase(userId: string) {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
-    const [programRows, bodyRows, nutritionRows] = await Promise.all([
+    const [programRows, bodyRows, nutritionRows, profileRows, workoutLogRows] = await Promise.all([
       supabase.from("programs").select("id,name,source,goal,duration_weeks,training_days,minutes_per_session,target_weight_kg,created_at,program_exercises(id,name,muscle_group,position,exercise_sets(id,position,weight_kg,reps,done))").order("created_at", { ascending: false }),
       supabase.from("body_records").select("id,recorded_on,weight_kg,height_cm,muscle_mass_kg,body_fat_pct").order("recorded_on", { ascending: false }),
       supabase.from("nutrition_plans").select("id,style,calories,protein_g,carbs_g,fat_g,created_at").order("created_at", { ascending: false }),
+      supabase.from("user_profiles").select("display_name,age,sex,activity_factor").eq("user_id", userId).maybeSingle(),
+      supabase.from("workout_set_logs").select("id,session_id,set_id,program_name,exercise_name,muscle_group,weight_kg,reps,completed_at").eq("user_id", userId).order("completed_at", { ascending: false }),
     ]);
-    const error = programRows.error ?? bodyRows.error ?? nutritionRows.error;
+    const error = programRows.error ?? bodyRows.error ?? nutritionRows.error ?? profileRows.error ?? workoutLogRows.error;
     if (error) { setMessage(`โหลดข้อมูลจาก Supabase ไม่สำเร็จ: ${error.message}`); setReady(true); return; }
     const programs: Program[] = (programRows.data ?? []).map((p: any) => ({ id: p.id, name: p.name, source: p.source, goal: p.goal, durationWeeks: p.duration_weeks, trainingDays: p.training_days, minutesPerSession: p.minutes_per_session, targetWeightKg: p.target_weight_kg ? Number(p.target_weight_kg) : undefined, createdAt: p.created_at, exercises: [...(p.program_exercises ?? [])].sort((a: any,b: any) => a.position-b.position).map((e: any) => ({ id: e.id, name: e.name, group: e.muscle_group, sets: [...(e.exercise_sets ?? [])].sort((a: any,b: any) => a.position-b.position).map((s: any) => ({ id: s.id, weight: Number(s.weight_kg), reps: s.reps, done: s.done })) })) }));
     const bodyRecords: BodyRecord[] = (bodyRows.data ?? []).map((b: any) => ({ id: b.id, date: b.recorded_on, weight: Number(b.weight_kg), height: Number(b.height_cm), muscle: Number(b.muscle_mass_kg), fat: Number(b.body_fat_pct) }));
     const nutritionPlans: NutritionPlan[] = (nutritionRows.data ?? []).map((p: any) => ({ id: p.id, style: p.style, calories: p.calories, protein: Number(p.protein_g), carbs: Number(p.carbs_g), fat: Number(p.fat_g), createdAt: p.created_at }));
+    const remoteWorkoutLogs: WorkoutLog[] = (workoutLogRows.data ?? []).map((log: any) => ({ id: log.id, sessionId: log.session_id, setId: log.set_id, programName: log.program_name, exerciseName: log.exercise_name, muscleGroup: log.muscle_group, weight: Number(log.weight_kg), reps: log.reps, completedAt: log.completed_at }));
+    const profile = profileRows.data as { display_name: string | null; age: number | null; sex: string | null; activity_factor: number | null } | null;
+    if (profile) setCalorieProfile({ age: profile.age ? String(profile.age) : "", sex: profile.sex ?? "", activity: profile.activity_factor ? String(profile.activity_factor) : "1.2" });
+    setCalorieProfileLoaded(true);
+    setWorkoutLogs((current) => [...current.filter((log) => !remoteWorkoutLogs.some((remoteLog) => remoteLog.id === log.id)), ...remoteWorkoutLogs]);
     setData({ programs: programs.length ? programs : seed.programs, bodyRecords: bodyRecords.length ? bodyRecords : seed.bodyRecords, nutritionPlans });
     setActiveProgramId(programs[0]?.id ?? starterProgram.id);
     setReady(true);
@@ -337,7 +345,16 @@ export default function FitnessApp() {
     const plan: NutritionPlan = { id: id(), calories: calorieEstimate, protein: calorieMacros.protein, carbs: calorieMacros.carbs, fat: calorieMacros.fat, style: planStyle, createdAt: new Date().toISOString() };
     setData((current) => ({ ...current, nutritionPlans: [plan, ...current.nutritionPlans] }));
     const supabase = getSupabaseBrowserClient();
-    if (supabase && userEmail) { const { data: user } = await supabase.auth.getUser(); if (user.user) { const { error } = await supabase.from("nutrition_plans").insert({ user_id: user.user.id, style: plan.style, calories: plan.calories, protein_g: plan.protein, carbs_g: plan.carbs, fat_g: plan.fat }); if (error) setMessage(`บันทึกไม่สำเร็จ: ${error.message}`); else void loadFromSupabase(user.user.id); } }
+    if (supabase && userEmail) {
+      const { data: auth } = await supabase.auth.getUser();
+      if (auth.user) {
+        const { error: profileError } = await supabase.from("user_profiles").upsert({ user_id: auth.user.id, display_name: auth.user.user_metadata?.full_name ?? null, age: Number(calorieProfile.age), sex: calorieProfile.sex, activity_factor: Number(calorieProfile.activity), updated_at: new Date().toISOString() });
+        const { error } = await supabase.from("nutrition_plans").insert({ user_id: auth.user.id, style: plan.style, calories: plan.calories, protein_g: plan.protein, carbs_g: plan.carbs, fat_g: plan.fat });
+        if (profileError) setMessage(`บันทึกข้อมูลโปรไฟล์ไม่สำเร็จ: ${profileError.message}`);
+        else if (error) setMessage(`บันทึกแผนไม่สำเร็จ: ${error.message}`);
+        else void loadFromSupabase(auth.user.id);
+      }
+    }
     setModal(null); setMessage("สร้างแผนโภชนาการแล้ว");
   }
 
@@ -347,9 +364,27 @@ export default function FitnessApp() {
     const changedSet = next.programs.flatMap((program) => program.exercises).flatMap((exercise) => exercise.sets).find((set) => set.id === setId);
     const changedExercise = next.programs.flatMap((program) => program.exercises).find((exercise) => exercise.id === exerciseId);
     if (changedSet && changedExercise && workoutStartedAt !== null) {
-      const logId = `${workoutStartedAt}:${setId}`;
-      if (changedSet.done) setWorkoutLogs((logs) => [...logs.filter((log) => log.id !== logId), { id: logId, sessionId: String(workoutStartedAt), programName: activeProgram.name, exerciseName: visibleExerciseName(changedExercise.name), muscleGroup: changedExercise.group, weight: changedSet.weight, reps: changedSet.reps, completedAt: new Date().toISOString() }]);
-      else setWorkoutLogs((logs) => logs.filter((log) => log.id !== logId));
+      const sessionId = workoutSessionId ?? String(workoutStartedAt);
+      const currentLog = workoutLogs.find((log) => log.sessionId === sessionId && log.setId === setId);
+      if (changedSet.done) {
+        const log: WorkoutLog = { id: currentLog?.id ?? id(), sessionId, setId, programName: activeProgram.name, exerciseName: visibleExerciseName(changedExercise.name), muscleGroup: changedExercise.group, weight: changedSet.weight, reps: changedSet.reps, completedAt: new Date().toISOString() };
+        setWorkoutLogs((logs) => [...logs.filter((item) => item.id !== log.id), log]);
+        const supabase = getSupabaseBrowserClient();
+        if (supabase && userEmail && workoutSessionId) {
+          const { data: auth } = await supabase.auth.getUser();
+          if (auth.user) {
+            const { error } = await supabase.from("workout_set_logs").upsert({ id: log.id, user_id: auth.user.id, session_id: workoutSessionId, set_id: setId, program_name: log.programName, exercise_name: log.exerciseName, muscle_group: log.muscleGroup, weight_kg: log.weight, reps: log.reps, completed_at: log.completedAt }, { onConflict: "session_id,set_id" });
+            if (error) setMessage(`บันทึกประวัติเซตไม่สำเร็จ: ${error.message}`);
+          }
+        }
+      } else {
+        setWorkoutLogs((logs) => logs.filter((log) => !(log.sessionId === sessionId && log.setId === setId)));
+        const supabase = getSupabaseBrowserClient();
+        if (supabase && userEmail && workoutSessionId) {
+          const { error } = await supabase.from("workout_set_logs").delete().eq("session_id", workoutSessionId).eq("set_id", setId);
+          if (error) setMessage(`ลบประวัติเซตไม่สำเร็จ: ${error.message}`);
+        }
+      }
     }
     const supabase = getSupabaseBrowserClient();
     if (supabase && userEmail && activeProgram.id !== "starter-upper") {
@@ -364,13 +399,23 @@ export default function FitnessApp() {
       const exerciseIds = new Set(activeWorkoutExercises.map((exercise) => exercise.id));
       const setIds = activeWorkoutExercises.flatMap((exercise) => exercise.sets.map((set) => set.id));
       setData((current) => ({ ...current, programs: current.programs.map((program) => ({ ...program, exercises: program.exercises.map((exercise) => exerciseIds.has(exercise.id) ? { ...exercise, sets: exercise.sets.map((set) => ({ ...set, done: false })) } : exercise) })) }));
+      const sessionId = id();
+      const startedAt = Date.now();
+      setWorkoutSessionId(sessionId);
+      setWorkoutStartedAt(startedAt);
       const supabase = getSupabaseBrowserClient();
-      if (supabase && userEmail && activeProgram.id !== "starter-upper" && setIds.length) {
-        const { error } = await supabase.from("exercise_sets").update({ done: false }).in("id", setIds);
-        if (error) setMessage(`เริ่มฝึกแล้ว แต่ล้างสถานะเซตเดิมไม่สำเร็จ: ${error.message}`);
+      if (supabase && userEmail) {
+        const { data: auth } = await supabase.auth.getUser();
+        if (auth.user) {
+          const { error } = await supabase.from("workout_sessions").insert({ id: sessionId, user_id: auth.user.id, program_id: activeProgram.id === "starter-upper" ? null : activeProgram.id, started_at: new Date(startedAt).toISOString() });
+          if (error) setMessage(`เริ่มฝึกแล้ว แต่บันทึกรอบฝึกไม่สำเร็จ: ${error.message}`);
+          if (activeProgram.id !== "starter-upper" && setIds.length) {
+            const reset = await supabase.from("exercise_sets").update({ done: false }).in("id", setIds);
+            if (reset.error) setMessage(`เริ่มฝึกแล้ว แต่ล้างสถานะเซตเดิมไม่สำเร็จ: ${reset.error.message}`);
+          }
+        }
       }
       setWorkoutElapsedSeconds(0);
-      setWorkoutStartedAt(Date.now());
     }
     setShowCancelWorkoutConfirm(false);
     setWorkoutScreenVisible(true);
@@ -383,19 +428,34 @@ export default function FitnessApp() {
     window.scrollTo({ top: 0, behavior: "instant" });
   }
 
-  function cancelWorkout() {
-    if (workoutStartedAt !== null) setWorkoutLogs((logs) => logs.filter((log) => log.sessionId !== String(workoutStartedAt)));
+  async function cancelWorkout() {
+    const sessionId = workoutSessionId;
+    if (sessionId) setWorkoutLogs((logs) => logs.filter((log) => log.sessionId !== sessionId));
+    const supabase = getSupabaseBrowserClient();
+    if (supabase && userEmail && sessionId) {
+      const { error } = await supabase.from("workout_sessions").delete().eq("id", sessionId);
+      if (error) setMessage(`ยกเลิกแล้ว แต่ลบรอบฝึกไม่สำเร็จ: ${error.message}`);
+    }
     setShowCancelWorkoutConfirm(false);
     setWorkoutScreenVisible(false);
     setWorkoutStartedAt(null);
+    setWorkoutSessionId(null);
     setWorkoutElapsedSeconds(0);
     window.scrollTo({ top: 0, behavior: "instant" });
   }
 
-  function finishWorkout() {
+  async function finishWorkout() {
+    const sessionId = workoutSessionId;
+    const startedAt = workoutStartedAt;
+    const supabase = getSupabaseBrowserClient();
+    if (supabase && userEmail && sessionId) {
+      const { error } = await supabase.from("workout_sessions").update({ completed_at: new Date().toISOString(), duration_seconds: startedAt === null ? workoutElapsedSeconds : Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) }).eq("id", sessionId);
+      if (error) setMessage(`เสร็จแล้ว แต่บันทึกเวลารอบฝึกไม่สำเร็จ: ${error.message}`);
+    }
     setShowCancelWorkoutConfirm(false);
     setWorkoutScreenVisible(false);
     setWorkoutStartedAt(null);
+    setWorkoutSessionId(null);
     setWorkoutElapsedSeconds(0);
     window.scrollTo({ top: 0, behavior: "instant" });
     setMessage("ออกกำลังกายเสร็จแล้ว");

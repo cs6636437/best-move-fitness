@@ -1,6 +1,16 @@
 -- BEST fitness app: user-owned data. Run this in Supabase SQL Editor.
 create extension if not exists pgcrypto;
 
+create table if not exists public.user_profiles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  display_name text check (display_name is null or char_length(display_name) between 1 and 80),
+  age smallint check (age between 19 and 78),
+  sex text check (sex in ('male', 'female', 'average')),
+  activity_factor numeric(4,3) check (activity_factor in (1.2, 1.375, 1.55, 1.725)),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.programs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -68,24 +78,48 @@ create table if not exists public.workout_sessions (
   program_id uuid references public.programs(id) on delete set null,
   started_at timestamptz not null default now(),
   completed_at timestamptz,
-  duration_seconds integer not null default 0 check (duration_seconds >= 0)
+  duration_seconds integer not null default 0 check (duration_seconds >= 0),
+  unique (id, user_id)
 );
 
+create table if not exists public.workout_set_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  session_id uuid not null,
+  set_id text not null,
+  program_name text not null,
+  exercise_name text not null,
+  muscle_group text not null default 'อก',
+  weight_kg numeric(7,2) not null default 0 check (weight_kg >= 0),
+  reps integer not null check (reps > 0),
+  completed_at timestamptz not null default now(),
+  constraint workout_set_logs_session_owner_fk foreign key (session_id, user_id) references public.workout_sessions(id, user_id) on delete cascade,
+  unique (session_id, set_id)
+);
+
+create index if not exists user_profiles_updated_idx on public.user_profiles(user_id, updated_at desc);
 create index if not exists programs_user_created_idx on public.programs(user_id, created_at desc);
 create index if not exists body_records_user_date_idx on public.body_records(user_id, recorded_on desc);
 create index if not exists nutrition_plans_user_created_idx on public.nutrition_plans(user_id, created_at desc);
 create index if not exists workout_sessions_user_started_idx on public.workout_sessions(user_id, started_at desc);
+create index if not exists workout_set_logs_user_completed_idx on public.workout_set_logs(user_id, completed_at desc);
 
+alter table public.user_profiles enable row level security;
 alter table public.programs enable row level security;
 alter table public.program_exercises enable row level security;
 alter table public.exercise_sets enable row level security;
 alter table public.body_records enable row level security;
 alter table public.nutrition_plans enable row level security;
 alter table public.workout_sessions enable row level security;
+alter table public.workout_set_logs enable row level security;
 
+create policy "Users manage own profile" on public.user_profiles for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "Users manage own programs" on public.programs for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "Users manage own program exercises" on public.program_exercises for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "Users manage own exercise sets" on public.exercise_sets for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "Users manage own body records" on public.body_records for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "Users manage own nutrition plans" on public.nutrition_plans for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "Users manage own workout sessions" on public.workout_sessions for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy "Users manage own workout set logs" on public.workout_set_logs for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+
+grant select, insert, update, delete on table public.user_profiles, public.programs, public.program_exercises, public.exercise_sets, public.body_records, public.nutrition_plans, public.workout_sessions, public.workout_set_logs to authenticated;

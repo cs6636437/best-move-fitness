@@ -15,7 +15,7 @@
 
 1. สร้างโปรเจกต์ Supabase
 2. คัดลอก `.env.example` เป็น `.env.local` แล้วกรอก Project URL และ Publishable key จากหน้า Connect ของโปรเจกต์
-3. รัน SQL ใน `supabase/migrations/202611140001_best_schema.sql` ผ่าน Supabase SQL Editor
+3. schema หลักถูกติดตั้งในโปรเจกต์ Supabase `BESTDB` แล้ว; หากตั้งค่าโปรเจกต์ใหม่ ให้รัน SQL ใน `supabase/migrations/20261114160402_best_fitness_core_schema.sql` ผ่าน Supabase SQL Editor
 4. รีสตาร์ต dev server แล้วสมัคร/ลงชื่อเข้าใช้จากแท็บ Profile
 
 อย่าใส่ Secret/service-role key ในตัวแปร `NEXT_PUBLIC_*` หรือในแอปฝั่งเบราว์เซอร์ ตารางข้อมูลเปิดใช้ RLS และจำกัดแถวตาม `auth.uid()` แล้ว
